@@ -4,16 +4,21 @@ import re
 import csv
 
 # ========================== PARAMETERS ==========================
-structures = ["6O2P"]
-mutations = ["p.Val470Met"]
+mutations = [
+    "p.Arg31Cys", "p.Gly85Glu", "p.Ile148Thr", "p.Arg170His", "p.Glu217Gly", "p.Ser256Gly", "p.Ile269Thr",
+    "p.Ile285Phe", "p.Arg297Gln", "p.Ala309Gly", "p.Ala399Val", "p.Val456Ala", "p.Leu467Phe", "p.Cys491Phe",
+    "p.Ser549Asn", "p.Tyr569Asp", "p.Gly622Asp", "p.Val855Ile", "p.Tyr919Cys", "p.Asp924Asn", "p.Leu997Phe",
+    "p.Ile1139Val", "p.Asn1303Ile"
+]
+
+structures = [
+    "5UAK", "5W81", "5UAR", "6MSM", "6O1V", "6O2P", "7SVR", "7SVD", "7SV7", "8EJ1", "8EIG", "8EIQ", "8EIO", "8FZQ"
+]
 output_csv_path = "./distances_data.csv"
 
 # ========================== DATA EXTRACTION ==========================
 
 def extract_section(log_output, start_marker, end_marker):
-    """
-    Extract content between start and end markers in ChimeraX log output.
-    """
     section_data = []
     in_section = False
     for line in log_output.splitlines():
@@ -27,9 +32,6 @@ def extract_section(log_output, start_marker, end_marker):
     return section_data
 
 def extract_atoms(log_output):
-    """
-    Extract atom IDs and select the best atom per residue based on priority.
-    """
     atom_data = []
     atom_pattern = re.compile(r'atom id (/A:(\d+)@(\S+)) idatm_type')
 
@@ -37,13 +39,12 @@ def extract_atoms(log_output):
         full_id, residue_num, atom_name = match.groups()
         atom_data.append((int(residue_num), atom_name, full_id))
 
-    # Prioritize atom selection per residue
     atom_priority = ["CA", "N", "CB", "CG1", "CG2", "CD", "CE"]
     best_atoms = {}
     
     for residue, atom_name, full_id in atom_data:
         if residue not in best_atoms:
-            best_atoms[residue] = (atom_name, full_id)  # First atom by default
+            best_atoms[residue] = (atom_name, full_id)
         else:
             current_best = best_atoms[residue][0]
             if atom_name in atom_priority and (
@@ -51,30 +52,22 @@ def extract_atoms(log_output):
             ):
                 best_atoms[residue] = (atom_name, full_id)
 
-    return [atom_id for _, atom_id in best_atoms.values()]  # Return optimized atom list
+    return [atom_id for _, atom_id in best_atoms.values()]
 
 def extract_distances(log_output):
-    """
-    Extract distance values from ChimeraX log output.
-    """
-    print(f"[DEBUG] Raw log before extraction:\n{log_output}")  
+    print(f"[DEBUG] Raw log before extraction:\n{log_output}")
 
-    # Updated regex to match the actual format in logs
     distance_pattern = re.compile(r"Distance between .*?: ([\d\.]+)Å")
-
     matches = distance_pattern.findall("\n".join(extract_section(log_output, "--start-distance--", "--end-distance--")))
 
     distances = [float(match) for match in matches] if matches else []
 
-    print(f"[DEBUG] Extracted raw distances: {distances}")  
+    print(f"[DEBUG] Extracted raw distances: {distances}")
     return distances
 
 # ========================== STRUCTURE VALIDATION ==========================
 
 def check_ligands():
-    """
-    Check if ligands exist in the opened structure before selecting them.
-    """
     with StringPlainTextLog(session.logger) as log:
         run(session, "select ligand")
         run(session, "info selection")
@@ -84,26 +77,37 @@ def check_ligands():
 # ========================== DISTANCE CALCULATION ==========================
 
 def compute_distances(atom_list1, atom_list2, structure, mutation):
-    """
-    Compute distances between optimized atom lists and count pairs under 5Å.
-    """
     count_in_range = 0
 
     print(f"\n[DEBUG] Computing distances between {len(atom_list1)} and {len(atom_list2)} atoms for {structure}_{mutation}...")
 
+    if not atom_list1 or not atom_list2:
+        print(f"[ERROR] One of the atom lists is empty! Skipping distance calculations for {structure}_{mutation}.")
+        return 0
+
+    # Delete existing distance measurements to avoid conflicts
+    run(session, "distance delete all")
+
     with StringPlainTextLog(session.logger) as log:
         run(session, "log text --start-distance--")
 
+        measured_pairs = set()  # To keep track of already measured distances
+
         for atom1 in atom_list1:
             for atom2 in atom_list2:
+                if atom1 == atom2 or (atom1, atom2) in measured_pairs or (atom2, atom1) in measured_pairs:
+                    print(f"[DEBUG] Skipping duplicate/self-distance: {atom1} to {atom2}")
+                    continue
+
+                print(f"[DEBUG] Measuring distance: {atom1} to {atom2}")
                 run(session, f"distance {atom1} {atom2}")
+                measured_pairs.add((atom1, atom2))  # Store the pair to prevent duplicate calculations
 
         run(session, "log text --end-distance--")
 
         log_output = log.getvalue()
         distance_values = extract_distances(log_output)
 
-        # 🔥 Debug each distance before counting
         for d in distance_values:
             print(f"[DEBUG] Checking distance {d}Å for {structure}_{mutation}")
             if d < 5.0:
@@ -111,15 +115,12 @@ def compute_distances(atom_list1, atom_list2, structure, mutation):
                 count_in_range += 1
 
     print(f"[DEBUG] Finished computing distances for {structure}_{mutation}. Found {count_in_range} pairs under 5Å.")
-
     return count_in_range
+
 
 # ========================== MAIN PROCESSING ==========================
 
 def process_structure(structure, mutation):
-    """
-    Process a single structure-mutation pair with detailed debug logs.
-    """
     print(f"\n========== Processing {structure} with mutation {mutation} ==========")
     residue_number = re.search(r'\d+', mutation).group()
 
@@ -200,7 +201,6 @@ for structure in structures:
         results.append([f"{structure}_{mutation}", count])
         print(f"{structure} {mutation}: {count} atom pairs under 5Å")
 
-# Save results to CSV
 with open(output_csv_path, 'w', newline='') as f:
     writer = csv.writer(f)
     writer.writerow(["Structure_Mutation", "Pairs"])
